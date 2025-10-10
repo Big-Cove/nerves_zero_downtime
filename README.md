@@ -4,6 +4,10 @@
 
 This library enables firmware updates without rebooting for application-level changes, while maintaining the safety guarantees of A/B partition updates.
 
+**THIS IS A PROOF OF CONCEPT AND NOT COMPLETE**
+
+**THIS DOES NOT FULLY WORK - IT DOES FOR FIRST UPDATE BUT NOT SUBSEQUENT UPDATES**
+
 ## Key Innovation
 
 The core innovation is combining two proven technologies:
@@ -89,25 +93,24 @@ Use the provided mix tasks to control hot reload behavior:
 # For application code changes - enable hot reload
 mix firmware.enable_reload
 mix firmware
-mix firmware.upload IP
+mix upload IP
 
 # For system changes - require reboot
 mix firmware.require_reboot
 mix firmware
-mix firmware.upload IP
+mix upload IP
 ```
 
 Or use combined commands:
 
 ```bash
 # Hot reload build
-mix firmware.enable_reload && mix firmware && mix firmware.upload IP
+mix firmware.enable_reload && mix firmware && mix upload IP
 
 # Reboot build
-mix firmware.require_reboot && mix firmware && mix firmware.upload IP
+mix firmware.require_reboot && mix firmware && mix upload IP
 ```
 
-See [HOT_RELOAD_SETUP.md](HOT_RELOAD_SETUP.md) for more details and advanced usage.
 
 **Important:** Only mark releases as hot-reload capable when you've changed:
 - ✅ Application code (Elixir/Erlang)
@@ -123,7 +126,7 @@ Do NOT mark for hot reload if you changed:
 
 ```bash
 # Upload to device
-mix firmware.upload 192.168.1.100
+mix upload 192.168.1.100
 ```
 
 The update will:
@@ -133,99 +136,56 @@ The update will:
 4. If marked: Hot reload application code (no downtime!)
 5. If not marked: Reboot to new partition (safe default)
 
-**Tip:** Add aliases to your `mix.exs`:
+**Tip:** Add aliases to your `mix.exs` for convenience:
 ```elixir
 defp aliases do
   [
-    "firmware.hot": ["nerves_zero_downtime.mark_hot_reload", "firmware"],
-    "firmware": ["compile", "firmware"]
+    "firmware.hot": ["firmware.enable_reload", "firmware"],
+    "firmware.reboot": ["firmware.require_reboot", "firmware"]
   ]
 end
 ```
 
 Then use:
-- `mix firmware.hot && mix firmware.upload IP` - Hot reload
-- `mix firmware && mix firmware.upload IP` - Regular reboot
-
-## Usage Examples
-
-### Programmatic Updates
-
-```elixir
-# Apply firmware update (auto-detects hot reload vs reboot)
-NervesZeroDowntime.apply_update("/path/to/firmware.fw")
-#=> {:ok, :hot_reloaded} or {:ok, :rebooting}
-
-# Force reboot even if hot reload capable
-NervesZeroDowntime.apply_update("/path/to/firmware.fw", force_reboot: true)
-
-# Dry run - analyze but don't execute
-NervesZeroDowntime.apply_update("/path/to/firmware.fw", dry_run: true)
-```
-
-### Check Status
-
-```elixir
-NervesZeroDowntime.status()
-#=> %{
-  current_version: "1.0.0",
-  partition_active: "a",
-  last_update: 1699564800,
-  pending_hot_reload: false,
-  update_history: [
-    %{from_version: "0.9.0", to_version: "1.0.0", result: :hot_reloaded, timestamp: 1699564800}
-  ]
-}
-```
-
-### Manual Control
-
-```elixir
-# Check if staged update can be hot-reloaded
-if NervesZeroDowntime.hot_reload_available?() do
-  IO.puts("Can hot reload")
-end
-
-# Manually trigger rollback
-NervesZeroDowntime.rollback()
-
-# Manually reboot to new partition
-NervesZeroDowntime.reboot_to_new_partition()
-```
+- `mix firmware.hot && mix upload IP` - Hot reload
+- `mix firmware.reboot && mix upload IP` - Full reboot
 
 ## How It Works
 
 ### Update Process Flow
 
 ```
-1. Upload firmware.fw to device
+1. Upload firmware via SSH (mix upload IP)
    ↓
-2. Extract and analyze metadata
+2. fwup writes firmware to inactive partition
    ↓
-3. Write firmware to inactive partition (via fwup)
+3. fwup updates boot configuration (U-Boot/MBR)
    ↓
-4. Update U-Boot environment / MBR boot flags
+4. ssh_subsystem_fwup calls NervesZeroDowntime.handle_firmware_update/0
    ↓
-5. Check if hot reload is safe
-   ├─→ Kernel/ERTS/NIF changed? → REBOOT
-   ├─→ Only app code changed? → HOT RELOAD
-   └─→ System unhealthy? → REBOOT (safe default)
+5. Mount inactive partition read-only
    ↓
-6a. HOT RELOAD path:
-    - Extract BEAM files to /data/hot_reload/<version>/
-    - Add code paths from /data
-    - Load new modules
-    - Validate system health
-    - If success: Mark firmware as validated
-    - If failure: Rollback and/or reboot
+6. Check for HOT_RELOAD marker file
+   ├─→ HOT_RELOAD=false or missing? → REBOOT
+   └─→ HOT_RELOAD=true? → Continue to hot reload
    ↓
-6b. REBOOT path:
-    - Trigger system reboot
-    - Boot from new partition
-    - Application validates firmware
-
-7. Device running new code
-   Ready to boot new partition on any reboot
+7. Discover BEAM files on mounted partition
+   ↓
+8. Filter modules (only reload application code, not OTP/Elixir core)
+   ↓
+9. Hot reload modules:
+    - Purge old code
+    - Load new code directly from mounted partition
+    - Validate reload success
+   ↓
+10. If reload succeeds:
+    - Mark firmware as validated
+    - Device running new code (zero downtime!)
+    - Ready to boot new partition on any reboot
+   ↓
+11. If reload fails:
+    - Attempt rollback to previous code
+    - If rollback fails: Reboot to new partition
 ```
 
 ### Safety Guarantees
@@ -248,7 +208,7 @@ NervesZeroDowntime.reboot_to_new_partition()
 ## Requirements
 
 - Nerves system with A/B partition support
-- Writable `/data` partition with minimum 100MB free space
+- Writable `/data` partition (for programmatic updates only; SSH uploads load directly from partition)
 - `fwup` utility available on device
 - Elixir 1.13 or later
 
@@ -262,6 +222,6 @@ NervesZeroDowntime.reboot_to_new_partition()
 
 ## License
 
-Copyright 2024 The Nerves Project
+Copyright 2024 Big Cove Technology
 
-Licensed under the Apache License, Version 2.0.
+All rights reserved. This code is proprietary and not licensed for public use.

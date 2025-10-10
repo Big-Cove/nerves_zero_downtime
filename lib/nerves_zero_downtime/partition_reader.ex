@@ -188,31 +188,5 @@ defmodule NervesZeroDowntime.PartitionReader do
     end
   end
 
-  defp parse_meta_conf(data) do
-    lines = String.split(data, "\n", trim: true)
-
-    Enum.reduce(lines, %{}, fn line, acc ->
-      case String.split(line, "=", parts: 2) do
-        [key, value] ->
-          # Normalize key to match MetadataAnalyzer expectations
-          key_normalized = normalize_meta_key(String.trim(key))
-          value_normalized = String.trim(value, "\"")
-          Map.put(acc, key_normalized, value_normalized)
-
-        _ ->
-          acc
-      end
-    end)
-  end
-
-  defp normalize_meta_key("meta-version"), do: :version
-  defp normalize_meta_key("meta-platform"), do: :platform
-  defp normalize_meta_key("meta-architecture"), do: :architecture
-  defp normalize_meta_key("meta-author"), do: :author
-  defp normalize_meta_key("meta-product"), do: :product
-  defp normalize_meta_key("meta-description"), do: :description
-  defp normalize_meta_key("meta-kernel-version"), do: :kernel_version
-  defp normalize_meta_key("meta-erts-version"), do: :erts_version
-  defp normalize_meta_key(key), do: String.to_atom(key)
 
 end

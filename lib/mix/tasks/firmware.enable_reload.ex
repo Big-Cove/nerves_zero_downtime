@@ -65,7 +65,7 @@ defmodule Mix.Tasks.Firmware.EnableReload do
 
     Next steps:
       mix firmware         # Build firmware with hot reload enabled
-      mix firmware.upload  # Upload to device
+      mix upload  # Upload to device
     """)
   end
 end

@@ -19,52 +19,43 @@ defmodule NervesZeroDowntime.HotReload do
   @doc """
   Prepare hot reload from mounted partition.
 
-  Copies BEAM files from the mounted inactive partition to /data/hot_reload/.
+  Note: Does not copy files - BEAM files will be loaded directly from mounted partition.
 
   ## Parameters
   - `mount_point`: Path to mounted partition (e.g., "/data/inactive_partition")
   - `target_version`: Version to install
 
   ## Returns
-  - `:ok` - Preparation successful
+  - `{:ok, mount_point}` - Preparation successful, returns mount point for loading
   - `{:error, reason}` - Preparation failed
   """
-  @spec prepare_from_partition(Path.t(), version()) :: :ok | {:error, term()}
+  @spec prepare_from_partition(Path.t(), version()) :: {:ok, Path.t()} | {:error, term()}
   def prepare_from_partition(mount_point, target_version) do
     Logger.info("Preparing hot reload from partition for version #{target_version}")
 
-    staging_path = Path.join(@hot_reload_base, target_version)
     source_lib = Path.join([mount_point, "srv", "erlang", "lib"])
 
-    with :ok <- ensure_hot_reload_directory(),
-         :ok <- clean_staging_directory(staging_path),
-         :ok <- copy_beam_files(source_lib, staging_path),
-         :ok <- validate_extracted_files(staging_path),
-         :ok <- create_staged_symlink(target_version),
-         :ok <- backup_current_version() do
-      Logger.info("Hot reload preparation complete for #{target_version}")
-      :ok
+    with :ok <- validate_beam_files(source_lib) do
+      Logger.info("Hot reload preparation complete for #{target_version} (loading from #{mount_point})")
+      {:ok, mount_point}
     else
       {:error, reason} = error ->
         Logger.error("Hot reload preparation failed: #{inspect(reason)}")
-        cleanup_failed_prepare(staging_path)
         error
     end
   end
 
-  defp copy_beam_files(source_lib, staging_path) do
-    dest_lib = Path.join(staging_path, "lib")
+  defp validate_beam_files(lib_path) do
+    # Check that expected files exist
+    cond do
+      not File.exists?(lib_path) ->
+        {:error, :missing_lib_directory}
 
-    Logger.info("Copying BEAM files from #{source_lib} to #{dest_lib}")
+      not has_beam_files?(lib_path) ->
+        {:error, :no_beam_files_found}
 
-    case File.cp_r(source_lib, dest_lib) do
-      {:ok, _files} ->
-        Logger.debug("BEAM files copied successfully")
+      true ->
         :ok
-
-      {:error, reason, file} ->
-        Logger.error("Failed to copy #{file}: #{inspect(reason)}")
-        {:error, {:copy_failed, reason, file}}
     end
   end
 
@@ -102,13 +93,9 @@ defmodule NervesZeroDowntime.HotReload do
   end
 
   @doc """
-  Apply hot reload from staged version.
+  Apply hot reload from staged version (for programmatic updates).
 
-  This performs the actual hot code reload:
-  1. Adds code paths from /data/hot_reload/staged
-  2. Loads new modules
-  3. Applies relup if available
-  4. Validates system health
+  This performs the actual hot code reload from /data/hot_reload/staged.
 
   ## Parameters
   - `target_version`: Version to apply
@@ -121,14 +108,44 @@ defmodule NervesZeroDowntime.HotReload do
   def apply(target_version) do
     Logger.info("Applying hot reload to version #{target_version}")
 
-    staged_path = Path.join(@hot_reload_base, "staged")
+    staged_path = Path.join(@hot_reload_base, "staged/lib")
 
-    with {:ok, apps} <- discover_applications(staged_path),
-         :ok <- add_code_paths(staged_path),
-         {:ok, reload_strategy} <- determine_reload_strategy(staged_path),
-         :ok <- execute_reload(reload_strategy, staged_path, apps),
-         :ok <- validate_reload(),
-         :ok <- update_current_symlink(target_version) do
+    with :ok <- execute_simple_reload(staged_path),
+         :ok <- validate_reload() do
+      Logger.info("Hot reload successful to #{target_version}")
+      {:ok, :hot_reloaded}
+    else
+      {:error, reason} = error ->
+        Logger.error("Hot reload failed: #{inspect(reason)}, initiating rollback")
+        rollback()
+        error
+    end
+  end
+
+  @doc """
+  Apply hot reload from mounted partition (for SSH updates).
+
+  This performs the actual hot code reload:
+  1. Discovers modules from mounted partition
+  2. Loads new modules directly from partition
+  3. Validates system health
+
+  ## Parameters
+  - `mount_point`: Path to mounted partition
+  - `target_version`: Version to apply
+
+  ## Returns
+  - `{:ok, :hot_reloaded}` - Successfully reloaded
+  - `{:error, reason}` - Reload failed
+  """
+  @spec apply(Path.t(), version()) :: {:ok, :hot_reloaded} | {:error, term()}
+  def apply(mount_point, target_version) do
+    Logger.info("Applying hot reload to version #{target_version}")
+
+    lib_path = Path.join([mount_point, "srv", "erlang", "lib"])
+
+    with :ok <- execute_simple_reload(lib_path),
+         :ok <- validate_reload() do
       Logger.info("Hot reload successful to #{target_version}")
       {:ok, :hot_reloaded}
     else
@@ -259,83 +276,14 @@ defmodule NervesZeroDowntime.HotReload do
     :ok
   end
 
-  defp discover_applications(base_path) do
-    lib_path = Path.join(base_path, "lib")
-
-    apps =
-      File.ls!(lib_path)
-      |> Enum.map(fn dir ->
-        # Extract app name from dir like "my_app-1.0.0"
-        case String.split(dir, "-") do
-          [app_name | _version_parts] -> String.to_atom(app_name)
-          _ -> nil
-        end
-      end)
-      |> Enum.reject(&is_nil/1)
-
-    {:ok, apps}
-  end
-
-  defp add_code_paths(base_path) do
-    lib_path = Path.join(base_path, "lib")
-
-    File.ls!(lib_path)
-    |> Enum.each(fn app_dir ->
-      ebin = Path.join([lib_path, app_dir, "ebin"])
-
-      if File.exists?(ebin) do
-        :code.add_pathz(String.to_charlist(ebin))
-        Logger.debug("Added code path: #{ebin}")
-      end
-    end)
-
-    :ok
-  end
-
-  defp determine_reload_strategy(base_path) do
-    relup_path = Path.join([base_path, "releases", "*", "relup"])
-
-    if Path.wildcard(relup_path) |> length() > 0 do
-      {:ok, :relup}
-    else
-      {:ok, :simple_reload}
-    end
-  end
-
-  defp execute_reload(:relup, staged_path, _apps) do
-    # Find relup file
-    relup_path =
-      Path.wildcard(Path.join([staged_path, "releases", "*", "relup"]))
-      |> List.first()
-
-    if relup_path do
-      # TODO: Use release_handler to apply relup
-      # For now, fall back to simple reload
-      Logger.warning("Relup found but not yet implemented, using simple reload")
-      execute_simple_reload(staged_path)
-    else
-      {:error, :relup_not_found}
-    end
-  end
-
-  defp execute_reload(:simple_reload, staged_path, _apps) do
-    execute_simple_reload(staged_path)
-  end
 
   defp execute_simple_reload(staged_path) do
     # Find all changed modules and reload them
     {changed_modules, filtered_count} = discover_changed_modules(staged_path)
 
-    Logger.info("Found #{length(changed_modules)} application modules to reload (filtered #{filtered_count} core modules)")
+    Logger.info("Reloading #{length(changed_modules)} application modules (skipped #{filtered_count} core modules)")
 
     results = Enum.map(changed_modules, fn {module, beam_path} ->
-      Logger.debug("Reloading module: #{module}")
-
-      # Check where the old module is loaded from
-      old_path = :code.which(module)
-      Logger.debug("  Old module path: #{inspect(old_path)}")
-      Logger.debug("  New module path: #{beam_path}")
-
       # Purge old code (both old and current)
       :code.purge(module)
       :code.delete(module)
@@ -346,15 +294,10 @@ defmodule NervesZeroDowntime.HotReload do
 
       case :code.load_abs(abs_path) do
         {:module, ^module} ->
-          new_path = :code.which(module)
-          Logger.info("✓ Reloaded #{module}")
-          Logger.info("  Old: #{inspect(old_path)}")
-          Logger.info("  New: #{inspect(new_path)}")
           {:ok, module}
 
         {:error, reason} ->
-          Logger.error("✗ Failed to load module #{module}: #{inspect(reason)}")
-          Logger.error("  Tried to load from: #{beam_path}")
+          Logger.error("Failed to reload #{module}: #{inspect(reason)}")
           {:error, module, reason}
       end
     end)
@@ -372,9 +315,9 @@ defmodule NervesZeroDowntime.HotReload do
     end
   end
 
-  defp discover_changed_modules(staged_path) do
-    # Get all beam files from staged path with their full paths
-    lib_path = Path.join(staged_path, "lib")
+  defp discover_changed_modules(lib_path) do
+    # Get all beam files from lib path with their full paths
+    # lib_path is like "/data/inactive_partition/srv/erlang/lib"
 
     # Get list of reloadable applications (exclude base system)
     reloadable_apps = get_reloadable_applications()
@@ -384,7 +327,7 @@ defmodule NervesZeroDowntime.HotReload do
     all_modules =
       Path.wildcard(Path.join([lib_path, "*", "ebin", "*.beam"]))
       |> Enum.map(fn beam_file ->
-        # Extract app name from path like "/data/.../lib/my_app-1.0.0/ebin/..."
+        # Extract app name from path like ".../lib/my_app-1.0.0/ebin/..."
         app_dir = beam_file |> Path.dirname() |> Path.dirname() |> Path.basename()
         app_name = extract_app_name(app_dir)
 
@@ -462,15 +405,14 @@ defmodule NervesZeroDowntime.HotReload do
     :ok
   end
 
-  defp restore_previous_code_paths(version) do
-    # Add code paths from previous version
-    base_path = Path.join(@hot_reload_base, version)
-    add_code_paths(base_path)
+  defp restore_previous_code_paths(_version) do
+    # Code paths don't need to be restored since we're loading directly
+    :ok
   end
 
   defp reload_previous_modules(version) do
     # Reload modules from previous version
-    base_path = Path.join(@hot_reload_base, version)
+    base_path = Path.join([@hot_reload_base, version, "lib"])
     execute_simple_reload(base_path)
   end
 end

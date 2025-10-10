@@ -60,7 +60,7 @@ defmodule Mix.Tasks.Firmware.RequireReboot do
 
     Next steps:
       mix firmware         # Build firmware with reboot required
-      mix firmware.upload  # Upload to device
+      mix upload  # Upload to device
     """)
   end
 end

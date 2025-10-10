@@ -14,9 +14,7 @@ defmodule NervesZeroDowntime.FirmwareStager do
 
   require Logger
 
-  alias NervesZeroDowntime.{MetadataAnalyzer, HotReload, PartitionReader}
-
-  @staged_bundle_path "/data/staged_hot_reload.tar.gz"
+  alias NervesZeroDowntime.{HotReload, PartitionReader}
 
   @doc """
   Check if there is staged firmware ready for hot reload.
@@ -60,8 +58,8 @@ defmodule NervesZeroDowntime.FirmwareStager do
     Logger.info("Applying hot reload from mounted partition for version #{version}")
 
     result =
-      with :ok <- HotReload.prepare_from_partition(mount_point, version),
-           {:ok, :hot_reloaded} <- HotReload.apply(version) do
+      with {:ok, mount_point} <- HotReload.prepare_from_partition(mount_point, version),
+           {:ok, :hot_reloaded} <- HotReload.apply(mount_point, version) do
         {:ok, :hot_reloaded}
       else
         {:error, reason} = error ->

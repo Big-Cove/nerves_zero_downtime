@@ -14,6 +14,7 @@ defmodule NervesZeroDowntime.MixProject do
       description: description(),
       package: package(),
       docs: docs(),
+      elixirc_options: [warnings_as_errors: true, no_warn_undefined: [Nerves.Runtime, Nerves.Runtime.KV, :memsup]],
       preferred_cli_env: [
         docs: :docs,
         "hex.publish": :docs,

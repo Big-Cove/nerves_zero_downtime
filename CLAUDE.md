@@ -186,11 +186,11 @@ The library supports two different update mechanisms:
 
 ## Testing
 
-See TESTING.md for:
-- Quick testing with TestHelper module
-- Full integration testing
-- Troubleshooting common issues
-- Performance testing
+Test on actual Nerves hardware:
+1. Mark firmware with `mix firmware.enable_reload`
+2. Build with `mix firmware`
+3. Upload with `mix upload <device_ip>`
+4. Monitor logs via SSH: `RingLogger.tail`
 
 ## Future Development Areas
 

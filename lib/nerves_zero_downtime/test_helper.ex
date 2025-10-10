@@ -63,7 +63,7 @@ defmodule NervesZeroDowntime.TestHelper do
     To test hot reload:
 
     1. Build firmware with a version bump
-    2. Upload via: mix firmware.upload <ip>
+    2. Upload via: mix upload <ip>
     3. Watch logs on device for hot reload messages
     4. If the partition can't be mounted, the system will reboot
 
