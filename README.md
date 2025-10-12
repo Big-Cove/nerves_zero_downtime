@@ -6,8 +6,6 @@ This library enables firmware updates without rebooting for application-level ch
 
 **THIS IS A PROOF OF CONCEPT AND NOT COMPLETE**
 
-**THIS DOES NOT FULLY WORK - IT DOES FOR FIRST UPDATE BUT NOT SUBSEQUENT UPDATES**
-
 ## Key Innovation
 
 The core innovation is combining two proven technologies:
