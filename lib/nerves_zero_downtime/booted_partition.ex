@@ -56,6 +56,67 @@ defmodule NervesZeroDowntime.BootedPartition do
   end
 
   @doc """
+  Update the booted partition's firmware metadata after hot reload.
+
+  After a successful hot reload, we need to copy the firmware metadata from
+  the active partition to the booted partition so that the version info is current.
+  This ensures tools like NervesMOTD show the correct version.
+  """
+  @spec update_booted_partition_metadata() :: :ok | {:error, term()}
+  def update_booted_partition_metadata do
+    kv = Nerves.Runtime.KV.get_all()
+    booted = kv["nerves_fw_booted"]
+    active = kv["nerves_fw_active"]
+
+    if booted && active && booted != active do
+      Logger.info("Updating #{booted} partition metadata from #{active} after hot reload")
+
+      # Copy key firmware metadata from active partition to booted partition
+      metadata_keys = [
+        "nerves_fw_version",
+        "nerves_fw_uuid",
+        "nerves_fw_vcs_identifier",
+        "nerves_fw_misc"
+      ]
+
+      results = Enum.map(metadata_keys, fn key ->
+        source_key = "#{active}.#{key}"
+        dest_key = "#{booted}.#{key}"
+
+        case kv[source_key] do
+          nil ->
+            Logger.debug("Skipping #{key} - not set in active partition")
+            :ok
+
+          value ->
+            case System.cmd("fw_setenv", [dest_key, value], stderr_to_stdout: true) do
+              {_, 0} ->
+                Logger.debug("Updated #{dest_key} = #{value}")
+                :ok
+
+              {output, code} ->
+                Logger.error("Failed to set #{dest_key}: #{output}")
+                {:error, {:fw_setenv_failed, code, dest_key}}
+            end
+        end
+      end)
+
+      # Reload KV cache to pick up the new values
+      Supervisor.terminate_child(Nerves.Runtime.Supervisor, Nerves.Runtime.KV)
+      Supervisor.restart_child(Nerves.Runtime.Supervisor, Nerves.Runtime.KV)
+
+      # Check if any updates failed
+      case Enum.find(results, &match?({:error, _}, &1)) do
+        nil -> :ok
+        error -> error
+      end
+    else
+      Logger.debug("Skipping metadata update - booted and active are the same")
+      :ok
+    end
+  end
+
+  @doc """
   Get the partition the kernel booted from by reading /proc/cmdline.
 
   Returns "a", "b", "c", or nil if unable to determine.

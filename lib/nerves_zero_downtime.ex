@@ -221,6 +221,8 @@ defmodule NervesZeroDowntime do
           Logger.info("Firmware hot-reloaded successfully")
           # Mark firmware as validated
           Nerves.Runtime.validate_firmware()
+          # Update booted partition metadata to reflect new version
+          BootedPartition.update_booted_partition_metadata()
 
         {:ok, :rebooting} ->
           Logger.info("Rebooting to new firmware...")
