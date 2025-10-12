@@ -19,14 +19,14 @@ defmodule NervesZeroDowntime.HotReload do
   @doc """
   Prepare hot reload from mounted partition.
 
-  Note: Does not copy files - BEAM files will be loaded directly from mounted partition.
+  Copies BEAM files from mounted partition to /data for safe loading after unmount.
 
   ## Parameters
   - `mount_point`: Path to mounted partition (e.g., "/data/inactive_partition")
   - `target_version`: Version to install
 
   ## Returns
-  - `{:ok, mount_point}` - Preparation successful, returns mount point for loading
+  - `{:ok, staging_path}` - Preparation successful, returns path to copied files
   - `{:error, reason}` - Preparation failed
   """
   @spec prepare_from_partition(Path.t(), version()) :: {:ok, Path.t()} | {:error, term()}
@@ -34,14 +34,33 @@ defmodule NervesZeroDowntime.HotReload do
     Logger.info("Preparing hot reload from partition for version #{target_version}")
 
     source_lib = Path.join([mount_point, "srv", "erlang", "lib"])
+    staging_path = Path.join(@hot_reload_base, target_version)
 
-    with :ok <- validate_beam_files(source_lib) do
-      Logger.info("Hot reload preparation complete for #{target_version} (loading from #{mount_point})")
-      {:ok, mount_point}
+    with :ok <- validate_beam_files(source_lib),
+         :ok <- ensure_hot_reload_directory(),
+         :ok <- clean_staging_directory(staging_path),
+         :ok <- copy_lib_directory(source_lib, staging_path) do
+      Logger.info("Hot reload preparation complete for #{target_version} (copied to #{staging_path})")
+      {:ok, staging_path}
     else
       {:error, reason} = error ->
         Logger.error("Hot reload preparation failed: #{inspect(reason)}")
         error
+    end
+  end
+
+  defp copy_lib_directory(source_lib, staging_path) do
+    dest_lib = Path.join(staging_path, "lib")
+    Logger.debug("Copying #{source_lib} to #{dest_lib}")
+
+    # Use system cp for efficient recursive copy
+    case System.cmd("cp", ["-r", source_lib, dest_lib], stderr_to_stdout: true) do
+      {_, 0} ->
+        Logger.debug("Successfully copied lib directory")
+        :ok
+      {output, code} ->
+        Logger.error("Failed to copy lib directory: #{output}")
+        {:error, {:copy_failed, code}}
     end
   end
 
@@ -123,15 +142,15 @@ defmodule NervesZeroDowntime.HotReload do
   end
 
   @doc """
-  Apply hot reload from mounted partition (for SSH updates).
+  Apply hot reload from staging path (for SSH updates).
 
   This performs the actual hot code reload:
-  1. Discovers modules from mounted partition
-  2. Loads new modules directly from partition
+  1. Discovers modules from staging path
+  2. Loads new modules from /data staging area
   3. Validates system health
 
   ## Parameters
-  - `mount_point`: Path to mounted partition
+  - `staging_path`: Path to staged files (e.g., "/data/hot_reload/<version>")
   - `target_version`: Version to apply
 
   ## Returns
@@ -139,10 +158,10 @@ defmodule NervesZeroDowntime.HotReload do
   - `{:error, reason}` - Reload failed
   """
   @spec apply(Path.t(), version()) :: {:ok, :hot_reloaded} | {:error, term()}
-  def apply(mount_point, target_version) do
+  def apply(staging_path, target_version) do
     Logger.info("Applying hot reload to version #{target_version}")
 
-    lib_path = Path.join([mount_point, "srv", "erlang", "lib"])
+    lib_path = Path.join(staging_path, "lib")
 
     with :ok <- execute_simple_reload(lib_path),
          :ok <- validate_reload() do
@@ -284,21 +303,30 @@ defmodule NervesZeroDowntime.HotReload do
     Logger.info("Reloading #{length(changed_modules)} application modules (skipped #{filtered_count} core modules)")
 
     results = Enum.map(changed_modules, fn {module, beam_path} ->
-      # Purge old code (both old and current)
-      :code.purge(module)
-      :code.delete(module)
+      # Logger.debug("Reloading module #{module} from #{beam_path}")
 
-      # Load new code using explicit path to ensure we get the new BEAM file
-      # We use load_abs which takes a path without the .beam extension
-      abs_path = Path.rootname(beam_path) |> String.to_charlist()
+      # Verify beam file exists before attempting reload
+      unless File.exists?(beam_path) do
+        Logger.error("BEAM file does not exist: #{beam_path}")
+        {:error, module, :beam_file_missing}
+      else
+        # Purge old code (both old and current)
+        :code.purge(module)
+        :code.delete(module)
 
-      case :code.load_abs(abs_path) do
-        {:module, ^module} ->
-          {:ok, module}
+        # Load new code using explicit path to ensure we get the new BEAM file
+        # We use load_abs which takes a path without the .beam extension
+        abs_path = Path.rootname(beam_path) |> String.to_charlist()
 
-        {:error, reason} ->
-          Logger.error("Failed to reload #{module}: #{inspect(reason)}")
-          {:error, module, reason}
+        case :code.load_abs(abs_path) do
+          {:module, ^module} ->
+            # Logger.debug("Successfully reloaded #{module}")
+            {:ok, module}
+
+          {:error, reason} ->
+            Logger.error("Failed to reload #{module}: #{inspect(reason)}")
+            {:error, module, reason}
+        end
       end
     end)
 
@@ -339,16 +367,23 @@ defmodule NervesZeroDowntime.HotReload do
         {module, beam_file, app_name}
       end)
 
+    # First filter: Remove base applications
     {app_modules, core_modules} = Enum.split_with(all_modules, fn {_module, _path, app} ->
       app in reloadable_apps
     end)
 
-    Logger.debug("Filtering modules: #{length(app_modules)} app modules, #{length(core_modules)} core modules skipped")
+    # Second filter: Remove any remaining core Elixir/Erlang modules by name
+    {safe_modules, additional_filtered} = Enum.split_with(app_modules, fn {module, _path, _app} ->
+      not is_core_module?(module)
+    end)
+
+    total_filtered = length(core_modules) + length(additional_filtered)
+    Logger.debug("Filtering modules: #{length(safe_modules)} app modules, #{total_filtered} core modules skipped")
 
     # Return just module and path tuples
-    app_module_tuples = Enum.map(app_modules, fn {mod, path, _app} -> {mod, path} end)
+    safe_module_tuples = Enum.map(safe_modules, fn {mod, path, _app} -> {mod, path} end)
 
-    {app_module_tuples, length(core_modules)}
+    {safe_module_tuples, total_filtered}
   end
 
   defp get_reloadable_applications do
@@ -367,10 +402,54 @@ defmodule NervesZeroDowntime.HotReload do
       :asn1, :syntax_tools, :sasl, :logger, :inets, :runtime_tools,
       :mnesia, :observer, :wx, :debugger, :dialyzer, :edoc, :erl_docgen,
       :et, :eunit, :ftp, :megaco, :odbc, :os_mon, :parsetools, :reltool,
-      :snmp, :ssh, :tftp, :tools, :xmerl
+      :snmp, :ssh, :tftp, :tools, :xmerl,
+      # Additional Elixir/Erlang core apps
+      :iex, :mix, :ex_unit, :hex, :eex, :logger_backends
     ]
 
     app in base_apps
+  end
+
+  # Check if a module is a core Elixir/Erlang module by its name
+  # These should never be reloaded as they may be critical to the running system
+  defp is_core_module?(module) do
+    module_str = Atom.to_string(module)
+
+    # Check for Elixir core modules
+    core_prefixes = [
+      "Elixir.IEx.",         # Interactive Elixir (shell)
+      "Elixir.Mix.",         # Build tool
+      "Elixir.ExUnit.",      # Testing framework
+      "Elixir.Logger.",      # Logging (be careful - might want to reload some)
+      "Elixir.Kernel",       # Core Elixir kernel
+      "Elixir.Code",         # Code loading/compilation
+      "Elixir.Module",       # Module introspection
+      "Elixir.Process",      # Process management
+      "Elixir.System",       # System interface
+      "Elixir.Application",  # Application controller
+      "Elixir.Supervisor",   # Supervision trees (might be safe, but risky)
+      "Elixir.GenServer",    # Generic server behavior
+      "Elixir.Agent",        # Agent behavior
+      "Elixir.Task",         # Task behavior
+    ]
+
+    # Check for Erlang core modules (atoms without "Elixir." prefix)
+    erlang_core_modules = [
+      :code, :code_server, :init, :erl_prim_loader, :erlang,
+      :erts_internal, :prim_file, :prim_inet, :prim_zip,
+      :application_controller, :application_master,
+      :gen_server, :gen_event, :gen_statem, :supervisor
+    ]
+
+    # Check if it's an Elixir core module
+    elixir_core? = Enum.any?(core_prefixes, fn prefix ->
+      String.starts_with?(module_str, prefix)
+    end)
+
+    # Check if it's an Erlang core module
+    erlang_core? = module in erlang_core_modules
+
+    elixir_core? or erlang_core?
   end
 
   defp extract_app_name(app_dir) do

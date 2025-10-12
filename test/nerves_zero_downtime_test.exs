@@ -2,7 +2,7 @@ defmodule NervesZeroDowntimeTest do
   use ExUnit.Case
   doctest NervesZeroDowntime
 
-  test "greets the world" do
-    assert NervesZeroDowntime.hello() == :world
+  test "module loads successfully" do
+    assert Code.ensure_loaded?(NervesZeroDowntime)
   end
 end

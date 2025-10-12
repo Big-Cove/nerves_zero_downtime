@@ -77,7 +77,7 @@ defmodule NervesZeroDowntime do
 
   require Logger
 
-  alias NervesZeroDowntime.{Orchestrator, FirmwareStager, Validator}
+  alias NervesZeroDowntime.{Orchestrator, FirmwareStager, Validator, BootedPartition}
 
   @doc """
   Apply a firmware update.
@@ -204,10 +204,17 @@ defmodule NervesZeroDowntime do
 
     # At this point, fwup has already:
     # 1. Written firmware to inactive partition
-    # 2. Updated boot configuration
+    # 2. Updated boot configuration (u-boot environment)
     # The firmware is staged and ready to boot on next reboot.
-    # Now we need to decide: hot reload or reboot?
+    #
+    # IMPORTANT: We need to reload the u-boot environment because Nerves.Runtime.KV
+    # caches it at boot time. After fwup modifies the u-boot env, the cache is stale.
+    # Tell the KV GenServer to reload by stopping and restarting it.
+    Logger.debug("Reloading u-boot environment after fwup update")
+    Supervisor.terminate_child(Nerves.Runtime.Supervisor, Nerves.Runtime.KV)
+    Supervisor.restart_child(Nerves.Runtime.Supervisor, Nerves.Runtime.KV)
 
+    # Now we need to decide: hot reload or reboot?
     spawn(fn ->
       case determine_and_apply_staged_update() do
         {:ok, :hot_reloaded} ->

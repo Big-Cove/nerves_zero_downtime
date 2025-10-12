@@ -5,8 +5,13 @@ defmodule NervesZeroDowntime.Application do
 
   use Application
 
+  alias NervesZeroDowntime.BootedPartition
+
   @impl true
   def start(_type, _args) do
+    # Initialize nerves_fw_booted at startup (idempotent - only sets if not already set)
+    BootedPartition.initialize_booted_partition()
+
     children = [
       # Starts a worker by calling: NervesZeroDowntime.Worker.start_link(arg)
       # {NervesZeroDowntime.Worker, arg}

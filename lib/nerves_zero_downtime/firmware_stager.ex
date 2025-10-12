@@ -22,8 +22,8 @@ defmodule NervesZeroDowntime.FirmwareStager do
   Reads the HOT_RELOAD marker file from the inactive partition.
   If present, the firmware can be hot reloaded. If absent, requires reboot.
 
-  Returns `{:ok, metadata}` if staged firmware exists and can be hot reloaded,
-  or `{:error, reason}` otherwise.
+  Returns `{:ok, {metadata, mount_point}}` if staged firmware
+  exists and can be hot reloaded, or `{:error, reason}` otherwise.
   """
   @spec check_staged_firmware() :: {:ok, {map(), Path.t()}} | {:error, term()}
   def check_staged_firmware do
@@ -50,25 +50,39 @@ defmodule NervesZeroDowntime.FirmwareStager do
   Apply staged firmware via hot reload.
 
   This assumes check_staged_firmware/0 has already verified the update is safe.
+
+  The process:
+  1. Copy BEAM files from mounted partition to /data staging area
+  2. Unmount the partition (files now safely in /data)
+  3. Load modules from /data staging area
   """
   @spec apply_staged_firmware({map(), Path.t()}) :: {:ok, :hot_reloaded} | {:error, term()}
   def apply_staged_firmware({metadata, mount_point}) do
     version = metadata["version"] || metadata[:version] || "unknown"
 
-    Logger.info("Applying hot reload from mounted partition for version #{version}")
+    Logger.info("Applying hot reload for version #{version}")
 
     result =
-      with {:ok, mount_point} <- HotReload.prepare_from_partition(mount_point, version),
-           {:ok, :hot_reloaded} <- HotReload.apply(mount_point, version) do
-        {:ok, :hot_reloaded}
+      with {:ok, staging_path} <- HotReload.prepare_from_partition(mount_point, version) do
+        # Cleanup (unmount) BEFORE loading modules - files are now in /data
+        Logger.debug("Unmounting partition before hot reload")
+        PartitionReader.cleanup()
+
+        # Now safely load from /data staging area
+        case HotReload.apply(staging_path, version) do
+          {:ok, :hot_reloaded} ->
+            {:ok, :hot_reloaded}
+
+          {:error, reason} = error ->
+            Logger.error("Failed to apply staged firmware: #{inspect(reason)}")
+            error
+        end
       else
         {:error, reason} = error ->
-          Logger.error("Failed to apply staged firmware: #{inspect(reason)}")
+          Logger.error("Failed to prepare staged firmware: #{inspect(reason)}")
+          PartitionReader.cleanup()
           error
       end
-
-    # Always cleanup, regardless of success or failure
-    PartitionReader.cleanup()
 
     result
   end

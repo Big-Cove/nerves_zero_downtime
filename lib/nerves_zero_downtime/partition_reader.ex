@@ -55,31 +55,37 @@ defmodule NervesZeroDowntime.PartitionReader do
     kv = Nerves.Runtime.KV.get_all()
     active = kv["nerves_fw_active"]
 
-    # Get the rootfs device for the inactive partition
-    # The active partition's rootfs is what we need to find
-    inactive_letter =
-      case active do
-        "a" -> "b"
-        "b" -> "a"
-        _ -> nil
-      end
+    # In a 3-partition system (A/B/C), after firmware is written and boot pointer updated,
+    # the inactive partition is the one that the boot pointer now points to (where the new firmware is).
+    # The system is still running from the original partition.
+    #
+    # Example: Running from A, boot pointer updated to B → we want to hot reload from B
+    # Example: Running from A (still), boot pointer updated to C → we want to hot reload from C
+    #
+    # The "active" variable tells us where the boot pointer is (not where we're currently running from).
+    # So we want to mount and hot reload from the "active" partition, not the "inactive" one.
+    #
+    # This is counterintuitive but correct: after fwup writes to the "inactive" partition and updates
+    # the boot pointer, that partition becomes "active" in the u-boot environment, even though we're
+    # still running from the previous partition.
+    target_letter = active
 
-    if inactive_letter do
-      # Extract the rootfs device from kernel_args for the inactive partition
-      # Example: "b.kernel_args" => "root=/dev/vda2 rootfstype=squashfs"
-      kernel_args = kv["#{inactive_letter}.kernel_args"]
+    if target_letter do
+      # Extract the rootfs device from kernel_args for the target partition
+      # Example: "b.kernel_args" => "root=/dev/vda5 rootfstype=squashfs"
+      kernel_args = kv["#{target_letter}.kernel_args"]
 
       case extract_root_device(kernel_args) do
         {:ok, device} ->
-          Logger.debug("Inactive partition (#{inactive_letter}) rootfs device: #{device}")
+          Logger.debug("Target partition (#{target_letter}) rootfs device: #{device}")
           {:ok, device}
 
         {:error, reason} ->
-          Logger.error("Could not determine inactive rootfs device: #{inspect(reason)}")
+          Logger.error("Could not determine target rootfs device: #{inspect(reason)}")
           {:error, reason}
       end
     else
-      Logger.error("Could not determine inactive partition letter")
+      Logger.error("Could not determine target partition")
       {:error, :unknown_active_partition}
     end
   end
@@ -105,6 +111,17 @@ defmodule NervesZeroDowntime.PartitionReader do
     # Create mount point
     File.mkdir_p!(@mount_point)
 
+    # Verify device node exists and is a block device (log only, don't fail)
+    Logger.debug("Verifying device #{device} before mount")
+    case File.stat(device) do
+      {:ok, %File.Stat{type: :device}} ->
+        Logger.debug("Device #{device} verified as block device")
+      {:ok, %File.Stat{type: type}} ->
+        Logger.warning("Device #{device} exists but is type #{type}, not :device")
+      {:error, reason} ->
+        Logger.error("Cannot stat device #{device}: #{inspect(reason)}")
+    end
+
     # Try to mount as squashfs (most Nerves systems use squashfs for rootfs)
     Logger.debug("Mounting #{device} at #{@mount_point}")
 
@@ -113,7 +130,8 @@ defmodule NervesZeroDowntime.PartitionReader do
          ) do
       {_, 0} ->
         Logger.debug("Partition mounted successfully")
-        {:ok, @mount_point}
+        # Verify mount point is accessible
+        verify_mount_accessible()
 
       {output, _code} ->
         Logger.error("Failed to mount partition: #{output}")
@@ -124,12 +142,27 @@ defmodule NervesZeroDowntime.PartitionReader do
              ) do
           {_, 0} ->
             Logger.debug("Partition mounted successfully (auto fs type)")
-            {:ok, @mount_point}
+            verify_mount_accessible()
 
           {output2, code2} ->
             Logger.error("Mount failed: #{output2}")
             {:error, {:mount_failed, code2, output2}}
         end
+    end
+  end
+
+  defp verify_mount_accessible do
+    # Wait a moment for filesystem to stabilize
+    Process.sleep(100)
+
+    # Verify we can list the mount point
+    case File.ls(@mount_point) do
+      {:ok, files} ->
+        Logger.debug("Mount point accessible, contains #{length(files)} entries")
+        {:ok, @mount_point}
+      {:error, reason} ->
+        Logger.error("Mount point not accessible: #{inspect(reason)}")
+        {:error, {:mount_not_accessible, reason}}
     end
   end
 
