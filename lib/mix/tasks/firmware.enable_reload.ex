@@ -56,7 +56,8 @@ defmodule Mix.Tasks.Firmware.EnableReload do
     Mix.shell().info("""
     ✓ Hot reload ENABLED for next firmware build
 
-    The file #{marker_path} has been set to "true".
+    Changes made:
+    - #{marker_path} set to "true"
 
     When this firmware is uploaded, the device will:
     1. Write firmware to inactive partition
@@ -65,7 +66,7 @@ defmodule Mix.Tasks.Firmware.EnableReload do
 
     Next steps:
       mix firmware         # Build firmware with hot reload enabled
-      mix upload  # Upload to device
+      mix upload           # Upload to device
     """)
   end
 end

@@ -40,6 +40,8 @@ defmodule Mix.Tasks.Firmware.RequireReboot do
 
   @impl Mix.Task
   def run(_args) do
+    Mix.shell().info("Disabling hot reload, requiring full reboot...\n")
+
     marker_dir = "rootfs_overlay/srv/erlang"
     marker_path = Path.join(marker_dir, "HOT_RELOAD")
 
@@ -50,9 +52,10 @@ defmodule Mix.Tasks.Firmware.RequireReboot do
     File.write!(marker_path, "false")
 
     Mix.shell().info("""
-    ✓ Full reboot REQUIRED for next firmware build
+    ✅ Full reboot REQUIRED for next firmware build
 
-    The file #{marker_path} has been set to "false".
+    Changes made:
+    - #{marker_path} set to "false"
 
     When this firmware is uploaded, the device will:
     1. Write firmware to inactive partition
@@ -60,7 +63,13 @@ defmodule Mix.Tasks.Firmware.RequireReboot do
 
     Next steps:
       mix firmware         # Build firmware with reboot required
-      mix upload  # Upload to device
+      mix upload           # Upload to device
+
+    💡 Note: This only disables hot reload. The A/B/C partition configuration
+    remains in place. To completely remove custom fwup configuration, delete:
+    - fwup.conf
+    - fwup_include/
+    And remove fwup_conf setting from config/target.exs
     """)
   end
 end
